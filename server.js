@@ -48,6 +48,7 @@ const BOT_VIEW_W = 1800, BOT_VIEW_H = 1100;      // area massima vista da un bot
 const GRID_CS = 256, GRID_N = Math.ceil((BORDER.x1 - BORDER.x0) / GRID_CS) + 1;   // griglia spaziale per le collisioni
 const gridIdx = v => { const i = (v / GRID_CS) | 0; return i < 0 ? 0 : (i >= GRID_N ? GRID_N - 1 : i); };
 const HUB_BACKLOG = 4 * 1024 * 1024;             // se la connessione dei bot e' intasata si saltano gli aggiornamenti
+let BOT_FIGHT = (process.env.BOT_FIGHT || '1') !== '0';   // i bot esterni possono mangiarsi tra loro (e farsi mangiare dai giocatori)
 let minionCount = 0;                             // bot esterni collegati in questo momento
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const TEAM_COLORS = [[255, 70, 70], [60, 220, 100], [70, 130, 255]];
@@ -202,7 +203,7 @@ class Game {
   }
   launchCell(p, c, dx, dy, speed) {
     const half = c.mass / 2;
-    c.mass = half;
+    c.mass = half; c.r = sizeOf(half);
     const n = this.newEnt(TYPE_CELL, c.x, c.y, half, p.color);
     n.owner = p; n.name = p.name; n.bx = dx; n.by = dy; n.bspeed = speed;
     const t = Date.now() + 15000 + half * 10;
@@ -220,7 +221,7 @@ class Game {
       let dx = p.mx - c.x, dy = p.my - c.y, d = Math.hypot(dx, dy);
       if (d < 1) { dx = 1; dy = 0; d = 1; }
       dx /= d; dy /= d;
-      c.mass -= EJECT_LOSS;
+      c.mass -= EJECT_LOSS; c.r = sizeOf(c.mass);
       const e = this.newEnt(TYPE_EJECT, c.x + dx * c.r, c.y + dy * c.r, EJECT_MASS, p.color);
       e.bx = dx; e.by = dy; e.bspeed = 650;
     }
@@ -261,7 +262,7 @@ class Game {
           const step = Math.min(d, 2200 * Math.pow(e.r, -0.439) * DT);
           e.x += dx / d * step; e.y += dy / d * step;
         }
-        if (e.mass > START_MASS) e.mass = Math.max(START_MASS, e.mass * (1 - 0.002 * DT));
+        if (e.mass > START_MASS) { e.mass = Math.max(START_MASS, e.mass * (1 - 0.002 * DT)); e.r = sizeOf(e.mass); }
       }
       if (e.bspeed > 0) {
         e.x += e.bx * e.bspeed * DT; e.y += e.by * e.bspeed * DT;
@@ -298,7 +299,7 @@ class Game {
     this.tickMs = this.tickMs * 0.9 + (performance.now() - t0) * 0.1;
   }
 
-  friendly(a, b) { return a.owner === b.owner || (a.owner.isMinion && b.owner.isMinion) || (this.mode === 'teams' && a.owner.team === b.owner.team); }
+  friendly(a, b) { return a.owner === b.owner || (!BOT_FIGHT && a.owner.isMinion && b.owner.isMinion) || (this.mode === 'teams' && a.owner.team === b.owner.team); }
 
   collisions(now) {
     const ents = this.ents;
@@ -664,6 +665,7 @@ setInterval(() => {
 const admin = require('./zl_admin')({
   games: () => games, minions: () => minionCount,
   getBotMax: () => BOT_MAX, setBotMax: v => { BOT_MAX = v; },
+  getBotFight: () => BOT_FIGHT, setBotFight: v => { BOT_FIGHT = !!v; },
   getFood: () => FOOD_TARGET,
   setFood: v => { FOOD_TARGET = v; for (const g of games.values()) for (const e of g.ents) if (g.foodCount > v && e.type === TYPE_FOOD && !e.dead) g.kill(e); },
   kickBots: () => { for (const g of games.values()) for (const h of Array.from(g.hubs)) { try { h.ws.close(4002, 'Bot scollegati dall\'amministratore'); } catch (e) {} } },
