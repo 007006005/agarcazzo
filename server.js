@@ -14,6 +14,9 @@
  *   BOT_MAX_MASS    massa iniziale massima concessa ai bot esterni (default 22500 = massa massima di una cella)
  *   FOOD_TARGET     quantita' di cibo sulla mappa (default 700; con molti bot conviene alzarla, es. 3000)
  *   ALLOWED_ORIGINS elenco di origin ammessi, separati da virgola (vuoto = tutti)
+ *   ADMIN_USERS     nomi utente admin, separati da virgola (default ZeroTheLegend) - vedi zl_admin.js
+ *   ADMIN_KEY       chiave del pannello admin dello script (se vuota usa BOT_KEY)
+ *   BAN_FILE        file dei ban (default ./bans.json)
  */
 const http = require('http');
 const crypto = require('crypto');
@@ -31,7 +34,7 @@ const MIN_SPLIT_MASS = 35;
 const MIN_EJECT_MASS = 32;
 const EJECT_LOSS = 16;
 const EJECT_MASS = 13;
-const FOOD_TARGET = Math.max(100, Math.min(20000, parseInt(process.env.FOOD_TARGET || '700', 10) || 700));
+let FOOD_TARGET = Math.max(100, Math.min(20000, parseInt(process.env.FOOD_TARGET || '700', 10) || 700));
 const VIRUS_TARGET = 16;
 const VIRUS_MASS = 100;
 const VIRUS_FEEDS = 7;
@@ -39,7 +42,7 @@ const MAX_PLAYERS_PER_ROOM = 80;
 const MAX_CONN_PER_IP = 8;
 const BOTS = Math.max(0, Math.min(60, parseInt(process.env.BOTS || '12', 10) || 0));
 const BOT_KEY = process.env.BOT_KEY || '';
-const BOT_MAX = Math.max(0, Math.min(2000, parseInt(process.env.BOT_MAX || '1000', 10) || 0));
+let BOT_MAX = Math.max(0, Math.min(2000, parseInt(process.env.BOT_MAX || '1000', 10) || 0));
 const BOT_MAX_MASS = Math.max(START_MASS, Math.min(MAX_CELL_MASS, parseInt(process.env.BOT_MAX_MASS || String(MAX_CELL_MASS), 10) || MAX_CELL_MASS));
 const BOT_VIEW_W = 1800, BOT_VIEW_H = 1100;      // area massima vista da un bot esterno (meno dati da inviare)
 const GRID_CS = 256, GRID_N = Math.ceil((BORDER.x1 - BORDER.x0) / GRID_CS) + 1;   // griglia spaziale per le collisioni
@@ -84,7 +87,7 @@ class Player {
   constructor(game, conn, isBot) {
     this.game = game; this.conn = conn; this.isBot = !!isBot;
     this.pid = ++uidCounter;
-    this.name = ''; this.user = null; this.team = 0;
+    this.name = ''; this.user = null; this.team = 0; this.ip = '';
     this.color = randomColor();
     this.cells = []; this.alive = false;
     this.mx = 0; this.my = 0;
@@ -606,6 +609,8 @@ function keyFail(ip) { const f = keyFails.get(ip); if (!f || Date.now() - f.t >=
 
 function onHub(ws, ip, url) {
   if (keyBlocked(ip)) return ws.close(4001, 'Troppi tentativi con chiave errata');
+  if (admin.isIpBanned(ip)) return ws.close(4001, 'IP bannato');
+  if (admin.botsLocked()) return ws.close(4002, 'Bot esterni bloccati dall\'amministratore');
   if (!BOT_KEY_HASH) return ws.close(4001, 'BOT_KEY non impostata sul server');
   if (!keyOk(url.searchParams.get('bk'))) { keyFail(ip); return ws.close(4001, 'Chiave bot errata'); }
   if (BOT_MAX <= 0) return ws.close(4002, 'Bot esterni disattivati (BOT_MAX=0)');
@@ -655,6 +660,16 @@ setInterval(() => {
   }
 }, 15000);
 
+// ---------------------------------------------------------------- amministrazione (comandi in chat e canale del pannello)
+const admin = require('./zl_admin')({
+  games: () => games, minions: () => minionCount,
+  getBotMax: () => BOT_MAX, setBotMax: v => { BOT_MAX = v; },
+  getFood: () => FOOD_TARGET,
+  setFood: v => { FOOD_TARGET = v; for (const g of games.values()) for (const e of g.ents) if (g.foodCount > v && e.type === TYPE_FOOD && !e.dead) g.kill(e); },
+  kickBots: () => { for (const g of games.values()) for (const h of Array.from(g.hubs)) { try { h.ws.close(4002, 'Bot scollegati dall\'amministratore'); } catch (e) {} } },
+  MAX_CELL_MASS, START_MASS, sizeOf, BORDER
+});
+
 // ---------------------------------------------------------------- server HTTP + WebSocket
 const server = http.createServer((req, res) => {
   if (req.url === '/health') {
@@ -680,7 +695,9 @@ const wss = new WebSocketServer({
 wss.on('connection', (ws, req) => {
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
   let url; try { url = new URL(req.url, 'http://x'); } catch (e) { url = new URL('http://x/'); }
+  if (url.searchParams.has('ak')) return admin.onChannel(ws, ip, url);                                  // pannello admin
   if (url.searchParams.has('bk') || url.searchParams.get('hub') === '1') return onHub(ws, ip, url);   // bot esterni
+  if (admin.isIpBanned(ip)) return ws.close(4003, 'IP bannato');
 
   const n = (ipCount.get(ip) || 0) + 1;
   if (n > MAX_CONN_PER_IP) return ws.close(1013, 'troppe connessioni');
@@ -689,6 +706,7 @@ wss.on('connection', (ws, req) => {
   if (game.humans() >= MAX_PLAYERS_PER_ROOM) { ipCount.set(ip, n - 1); return ws.close(1013, 'stanza piena'); }
 
   const player = new Player(game, ws, false);
+  player.ip = ip;
   game.assignTeam(player);
   game.players.add(player);
   game.emptySince = 0;
@@ -709,7 +727,9 @@ wss.on('connection', (ws, req) => {
     const op = buf[0];
     switch (op) {
       case 150: { // token di login
-        player.user = account.verifyToken(readUtf16(buf, 1)); break;
+        player.user = account.verifyToken(readUtf16(buf, 1));
+        if (player.user && admin.isUserBanned(player.user.name)) return ws.close(4003, 'Account bannato: ' + admin.banReason(player.user.name, ip));
+        break;
       }
       case 192: { // nickname -> entra in partita
         if (player.alive || Date.now() - player.lastSpawn < 800) break;
@@ -730,7 +750,14 @@ wss.on('connection', (ws, req) => {
       }
       case 17: game.split(player); break;
       case 21: game.eject(player); break;
-      case 206: if (buf.length > 2) game.chat(player, readUtf16(buf, 2)); break;
+      case 206: if (buf.length > 2) {
+        const text = readUtf16(buf, 2).replace(/[\u0000-\u001f]/g, '');
+        if (text.charAt(0) === '/' && admin.isAdmin(player.user)) {          // comando admin: risposta solo a lui
+          for (const l of admin.run(text.slice(1)).slice(0, 6)) {
+            const w = new Writer(64 + l.length * 2); w.u8(99); w.u8(0); w.u8(255); w.u8(200); w.u8(0); w.str('SERVER'); w.str(l.slice(0, 120)); send(ws, w.done());
+          }
+        } else game.chat(player, text);
+      } break;
       default: break; // 254, 255, 56, 18, 19, 65, 1...: ignorati
     }
   });
