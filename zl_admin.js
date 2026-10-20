@@ -41,7 +41,7 @@ module.exports = function createAdmin(ctx) {
   const HELP = [
     '/list  /kick n  /ban n [min] [motivo]  /unban nome|ip  /bans',
     '/mass n massa  /kill n  /tp n x y  /botmax N  /botlock on|off',
-    '/kickbots  /food N  /status   (n = nome o id)'
+    '/kickbots  /botfight on|off  /food N  /status   (n = nome o id)'
   ];
 
   // esegue un comando (senza "/" iniziale) e restituisce un array di righe di risposta
@@ -114,6 +114,10 @@ module.exports = function createAdmin(ctx) {
         if (!/^(on|off)$/i.test(A[0] || '')) return ['uso: /botlock on|off'];
         botsLocked = lc(A[0]) === 'on'; if (botsLocked) ctx.kickBots();
         return ['bot esterni ' + (botsLocked ? 'bloccati e scollegati' : 'di nuovo ammessi')];
+      }
+      case 'botfight': {
+        if (!/^(on|off)$/i.test(A[0] || '')) return ['bot che si mangiano tra loro: ' + (ctx.getBotFight() ? 'on' : 'off') + '  (uso: /botfight on|off)'];
+        ctx.setBotFight(lc(A[0]) === 'on'); return ['bot che si mangiano tra loro: ' + lc(A[0])];
       }
       case 'kickbots': { ctx.kickBots(); return ['bot esterni scollegati']; }
       case 'food': {
