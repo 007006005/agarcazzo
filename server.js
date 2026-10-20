@@ -1,6 +1,6 @@
 'use strict';
 /*
- * ZeroLegend Agar - server di gioco WebSocket (modalita' ffa / teams / party)
+ * ZeroLegend Agar - server di gioco WebSocket (modalita' ffa / teams / party / antartica)
  * Compatibile con il client lib/js/datad23b.js (protocollo binario stile Ogar).
  *
  * Variabili ambiente (tutte opzionali):
@@ -8,7 +8,7 @@
  *   AUTH_SECRET     stessa stringa di api/config.local.php  -> verifica i token di login
  *   SERVER_KEY      stessa stringa di api/config.local.php  -> firma i salvataggi
  *   SAVE_URL        https://agar.master-elettroerosioni.it/api/save.php
- *   BOTS            numero di bot per stanza ffa/teams (default 12)
+ *   BOTS            numero di bot per stanza ffa/teams/antartica (default 12)
  *   ALLOWED_ORIGINS elenco di origin ammessi, separati da virgola (vuoto = tutti)
  */
 const http = require('http');
@@ -41,6 +41,33 @@ const BOT_NAMES = ['Zero', 'Nova', 'Pixel', 'Blaze', 'Orbit', 'Echo', 'Rogue', '
 const TYPE_CELL = 0, TYPE_FOOD = 1, TYPE_VIRUS = 2, TYPE_EJECT = 3;
 const sizeOf = mass => Math.sqrt(mass * 100);
 const rnd = (a, b) => a + Math.random() * (b - a);
+
+// ---------------------------------------------------------------- regole per modalita'
+// Ogni modalita' parte da DEFAULT_RULES e puo' sovrascrivere alcuni valori in MODE_RULES.
+const DEFAULT_RULES = {
+  maxCells: MAX_CELLS,            // numero massimo di cellule per giocatore
+  maxCellMass: MAX_CELL_MASS,     // massa massima di una cellula
+  minSplitMass: MIN_SPLIT_MASS,   // massa minima per dividersi
+  minEjectMass: MIN_EJECT_MASS,   // massa minima per sparare una pallina
+  ejectLoss: EJECT_LOSS,          // massa persa da chi spara
+  ejectMass: EJECT_MASS,          // massa della pallina
+  decay: true,                    // la massa grande cala col tempo
+  mergeBase: 15000,               // ms prima che le cellule si riuniscano
+  mergePerMass: 10,               // ms in piu' per ogni punto di massa
+  ejectLife: 0,                   // ms di vita delle palline (0 = illimitata)
+  grantXp: true                   // le partite danno XP (save.php)
+};
+const MODE_RULES = {
+  // Antartica: niente limiti, ci si "autoalimenta". Ogni pallina vale piu' di quanto costa,
+  // quindi spararsi addosso e dividersi continuamente fa crescere molto in fretta.
+  antartica: {
+    maxCells: 64, maxCellMass: 500000, minSplitMass: 20,
+    minEjectMass: 20, ejectLoss: 10, ejectMass: 20,
+    decay: false, mergeBase: 2500, mergePerMass: 0, ejectLife: 20000,
+    grantXp: false                // metti true se vuoi dare XP anche in questa modalita'
+  }
+};
+const VALID_MODES = ['ffa', 'ffa2', 'experimental', 'teams', 'party', 'antartica'];
 
 function hsl(h, s, l) {
   s /= 100; l /= 100;
@@ -93,6 +120,7 @@ class Player {
 class Game {
   constructor(key, mode) {
     this.key = key; this.mode = mode;
+    this.rules = Object.assign({}, DEFAULT_RULES, MODE_RULES[mode] || {});
     this.ents = []; this.nextId = 1;
     this.players = new Set();
     this.eats = []; this.tickN = 0;
@@ -107,7 +135,7 @@ class Game {
   }
   newEnt(type, x, y, mass, color) {
     const e = { id: this.nextId++, type, x, y, mass, r: sizeOf(mass), color, owner: null, name: '',
-      bx: 0, by: 0, bspeed: 0, mergeAt: 0, feeds: 0, dead: false, dirty: false };
+      bx: 0, by: 0, bspeed: 0, mergeAt: 0, feeds: 0, dead: false, dirty: false, expire: 0 };
     this.ents.push(e);
     return e;
   }
@@ -153,7 +181,7 @@ class Game {
   playerDied(p, killer) {
     p.alive = false; p.cells = [];
     if (killer && killer.owner) killer.owner.kills++;
-    if (p.user) {
+    if (p.user && this.rules.grantXp) {
       const stats = { kills: p.kills, maxMass: p.maxMass, seconds: Math.floor((Date.now() - p.spawnAt) / 1000) };
       account.saveSession(p.user, p.sessionUid, stats).catch(err => console.error('save fallito:', err.message));
     }
@@ -173,8 +201,8 @@ class Game {
     if (!p.alive) return;
     const cells = p.cells.slice().sort((a, b) => b.mass - a.mass);
     for (const c of cells) {
-      if (p.cells.length >= MAX_CELLS) break;
-      if (c.mass < MIN_SPLIT_MASS) continue;
+      if (p.cells.length >= this.rules.maxCells) break;
+      if (c.mass < this.rules.minSplitMass) continue;
       let dx = p.mx - c.x, dy = p.my - c.y, d = Math.hypot(dx, dy);
       if (d < 1) { dx = 1; dy = 0; d = 1; }
       this.launchCell(p, c, dx / d, dy / d, 780);
@@ -182,10 +210,10 @@ class Game {
   }
   launchCell(p, c, dx, dy, speed) {
     const half = c.mass / 2;
-    c.mass = half;
+    c.mass = half; c.r = sizeOf(half);
     const n = this.newEnt(TYPE_CELL, c.x, c.y, half, p.color);
     n.owner = p; n.name = p.name; n.bx = dx; n.by = dy; n.bspeed = speed;
-    const t = Date.now() + 15000 + half * 10;
+    const t = Date.now() + this.rules.mergeBase + half * this.rules.mergePerMass;
     n.mergeAt = t; c.mergeAt = t;
     p.cells.push(n); p.pendingAdd.push(n.id);
     return n;
@@ -196,13 +224,14 @@ class Game {
     if (now - p.lastEject < 50) return;
     p.lastEject = now;
     for (const c of p.cells) {
-      if (c.mass < MIN_EJECT_MASS) continue;
+      if (c.mass < this.rules.minEjectMass) continue;
       let dx = p.mx - c.x, dy = p.my - c.y, d = Math.hypot(dx, dy);
       if (d < 1) { dx = 1; dy = 0; d = 1; }
       dx /= d; dy /= d;
-      c.mass -= EJECT_LOSS;
-      const e = this.newEnt(TYPE_EJECT, c.x + dx * c.r, c.y + dy * c.r, EJECT_MASS, p.color);
+      c.mass -= this.rules.ejectLoss; c.r = sizeOf(c.mass);
+      const e = this.newEnt(TYPE_EJECT, c.x + dx * c.r, c.y + dy * c.r, this.rules.ejectMass, p.color);
       e.bx = dx; e.by = dy; e.bspeed = 650;
+      if (this.rules.ejectLife) e.expire = now + this.rules.ejectLife;
     }
   }
   chat(p, text) {
@@ -233,14 +262,16 @@ class Game {
     // movimento
     for (const e of this.ents) {
       if (e.dead) continue;
+      if (e.expire && now > e.expire) { this.kill(e); continue; }
       if (e.type === TYPE_CELL) {
+        e.r = sizeOf(e.mass);
         const p = e.owner;
         const dx = p.mx - e.x, dy = p.my - e.y, d = Math.hypot(dx, dy);
         if (d > 1) {
           const step = Math.min(d, 2200 * Math.pow(e.r, -0.439) * DT);
           e.x += dx / d * step; e.y += dy / d * step;
         }
-        if (e.mass > START_MASS) e.mass = Math.max(START_MASS, e.mass * (1 - 0.002 * DT));
+        if (this.rules.decay && e.mass > START_MASS) e.mass = Math.max(START_MASS, e.mass * (1 - 0.002 * DT));
       }
       if (e.bspeed > 0) {
         e.x += e.bx * e.bspeed * DT; e.y += e.by * e.bspeed * DT;
@@ -334,7 +365,7 @@ class Game {
   absorb(big, small) {
     this.kill(small);
     this.eats.push([big.id, small.id]);
-    if (big.type === TYPE_CELL) big.mass = Math.min(MAX_CELL_MASS, big.mass + small.mass);
+    if (big.type === TYPE_CELL) big.mass = Math.min(this.rules.maxCellMass, big.mass + small.mass);
     big.r = sizeOf(big.mass);
     if (small.type === TYPE_CELL) {
       const p = small.owner;
@@ -347,13 +378,13 @@ class Game {
     this.kill(v);
     this.eats.push([c.id, v.id]);
     const p = c.owner;
-    const total = Math.min(MAX_CELL_MASS, c.mass + v.mass);
-    const avail = MAX_CELLS - p.cells.filter(x => !x.dead).length;
+    const total = Math.min(this.rules.maxCellMass, c.mass + v.mass);
+    const avail = this.rules.maxCells - p.cells.filter(x => !x.dead).length;
     let k = Math.min(avail, 7, Math.floor(total / 10) - 1);
     if (k <= 0) { c.mass = total; c.r = sizeOf(c.mass); return; }
     const m = total / (k + 1);
     c.mass = m; c.r = sizeOf(m);
-    const a0 = rnd(0, Math.PI * 2), t = Date.now() + 15000 + m * 10;
+    const a0 = rnd(0, Math.PI * 2), t = Date.now() + this.rules.mergeBase + m * this.rules.mergePerMass;
     c.mergeAt = t;
     for (let i = 0; i < k; i++) {
       const a = a0 + i * (Math.PI * 2 / k);
@@ -469,7 +500,7 @@ function send(ws, buf) { if (ws.readyState === 1) ws.send(buf, { binary: true },
 // ---------------------------------------------------------------- stanze
 const games = new Map();
 function getGame(mode, room) {
-  if (!['ffa', 'ffa2', 'experimental', 'teams', 'party'].includes(mode)) mode = 'ffa';
+  if (!VALID_MODES.includes(mode)) mode = 'ffa';
   room = String(room || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24);
   if (mode === 'party' && !room) room = 'public';
   const key = mode === 'party' ? 'party:' + room : mode;
