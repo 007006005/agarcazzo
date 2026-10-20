@@ -33,7 +33,7 @@ const VIRUS_MASS = 100;
 const VIRUS_FEEDS = 7;
 const MAX_PLAYERS_PER_ROOM = 80;
 const MAX_CONN_PER_IP = 8;
-const BOTS = Math.max(0, Math.min(60, parseInt(process.env.BOTS || '12', 10) || 0));
+const BOTS = Math.max(0, Math.min(60, parseInt(process.env.BOTS || '12', 1000) || 0));
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 const TEAM_COLORS = [[255, 70, 70], [60, 220, 100], [70, 130, 255]];
 const BOT_NAMES = ['Zero', 'Nova', 'Pixel', 'Blaze', 'Orbit', 'Echo', 'Rogue', 'Comet', 'Viper', 'Mochi', 'Titan', 'Pulse', 'Ghost', 'Drift', 'Ninja'];
