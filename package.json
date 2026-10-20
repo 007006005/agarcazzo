@@ -1,0 +1,17 @@
+{
+  "name": "zerolegend-agar-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "node": "^26.12.0",
+    "socket.io": "^4.8.4",
+    "ws": "^8.22.0"
+  }
+}
